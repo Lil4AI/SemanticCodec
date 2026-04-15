@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Codec v0.3.1 | Generative Image Compression</title>
+    <meta name="description" content="A generative image compression prototype using Stable Diffusion, ControlNet Depth, and VQA-enhanced prompt extraction for lossless foreground and AI-reconstructed background.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="background-effects">
+        <div class="glow-orb orb-1"></div>
+        <div class="glow-orb orb-2"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon"></div>
+                <h1>Semantic Codec</h1>
+            </div>
+            <p>Foreground Fidelity. Background Generativity.</p>
+            <span class="version-badge">v0.3.1 — Optimization Patch</span>
+        </header>
+
+        <main class="app-card">
+            <div class="tabs">
+                <button class="tab-btn active" data-target="encode-panel" type="button">Encode (.semic)</button>
+                <button class="tab-btn" data-target="decode-panel" type="button">Decode</button>
+            </div>
+
+            <div class="panel-content">
+                <!-- Encode Panel -->
+                <div id="encode-panel" class="panel active">
+                    <form id="encode-form">
+                        <div class="upload-zone" id="encode-dropzone">
+                            <span class="upload-icon">⇪</span>
+                            <span class="upload-text">Drag & Drop an image here or click to browse</span>
+                            <input type="file" id="encode-file" accept="image/jpeg, image/png, image/webp" hidden>
+                        </div>
+
+                        <div class="options">
+                            <h3>LoRA Settings (Optional)</h3>
+                            <div class="input-group" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px;">
+                                <label for="lora-model" class="input-label">LoRA Filename (in loras/):</label>
+                                <input type="text" id="lora-model" name="lora-model" placeholder="e.g. style.safetensors" class="text-input">
+
+                                <label for="lora-scale" class="input-label" style="margin-top: 10px;">LoRA Strength: <span id="lora-scale-val">1.0</span></label>
+                                <input type="range" id="lora-scale" name="lora-scale" min="0" max="2" step="0.1" value="1.0" oninput="document.getElementById('lora-scale-val').innerText=this.value">
+                            </div>
+                        </div>
+
+                        <div class="options">
+                            <h3>Compression Profile</h3>
+                            <div class="radio-group">
+                                <label class="radio-card">
+                                    <input type="radio" name="encode-mode" value="Lite">
+                                    <div class="card-content">
+                                        <h4>Lite</h4>
+                                        <p>Fast • Minimum Size</p>
+                                    </div>
+                                </label>
+                                <label class="radio-card">
+                                    <input type="radio" name="encode-mode" value="Standard" checked>
+                                    <div class="card-content">
+                                        <h4>Standard</h4>
+                                        <p>SD Inpainting • Balanced</p>
+                                    </div>
+                                </label>
+                                <label class="radio-card">
+                                    <input type="radio" name="encode-mode" value="HighFi">
+                                    <div class="card-content">
+                                        <h4>HighFi</h4>
+                                        <p>SD + Depth • High Quality</p>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="action-btn" id="encode-btn">
+                            <span class="btn-text">Generate .semic Archive</span>
+                            <span class="loader" style="display: none;"></span>
+                        </button>
+                    </form>
+
+                    <!-- Compression Stats Card -->
+                    <div id="stats-container" class="stats-card" style="display: none;">
+                        <h3>📊 Compression Results</h3>
+                        <div class="stats-grid">
+                            <div class="stat-item">
+                                <span class="stat-label">Original</span>
+                                <span class="stat-value" id="stat-original">—</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">.semic Size</span>
+                                <span class="stat-value" id="stat-semic">—</span>
+                            </div>
+                            <div class="stat-item stat-highlight">
+                                <span class="stat-label">Compression</span>
+                                <span class="stat-value" id="stat-ratio">—</span>
+                            </div>
+                            <div class="stat-item stat-highlight">
+                                <span class="stat-label">Ratio</span>
+                                <span class="stat-value" id="stat-ratio-display">—</span>
+                            </div>
+                        </div>
+                        <div class="stats-breakdown">
+                            <h4>Component Breakdown</h4>
+                            <div class="breakdown-bars">
+                                <div class="breakdown-item">
+                                    <span class="breakdown-label">fg_color.webp</span>
+                                    <div class="breakdown-bar"><div class="breakdown-fill fg-color-fill" id="bar-fg-color"></div></div>
+                                    <span class="breakdown-size" id="size-fg-color">—</span>
+                                </div>
+                                <div class="breakdown-item">
+                                    <span class="breakdown-label">fg_alpha.webp</span>
+                                    <div class="breakdown-bar"><div class="breakdown-fill fg-alpha-fill" id="bar-fg-alpha"></div></div>
+                                    <span class="breakdown-size" id="size-fg-alpha">—</span>
+                                </div>
+                                <div class="breakdown-item">
+                                    <span class="breakdown-label">depth_map.webp</span>
+                                    <div class="breakdown-bar"><div class="breakdown-fill depth-fill" id="bar-depth"></div></div>
+                                    <span class="breakdown-size" id="size-depth">—</span>
+                                </div>
+                                <div class="breakdown-item">
+                                    <span class="breakdown-label">thumb.jpg</span>
+                                    <div class="breakdown-bar"><div class="breakdown-fill thumb-fill" id="bar-thumb"></div></div>
+                                    <span class="breakdown-size" id="size-thumb">—</span>
+                                </div>
+                            </div>
+                        </div>
+                        <a id="stats-download-btn" class="action-btn secondary" style="margin-top: 16px; display: inline-flex; text-decoration: none;">Download .semic.jpg</a>
+                    </div>
+                </div>
+
+                <!-- Decode Panel -->
+                <div id="decode-panel" class="panel">
+                    <form id="decode-form">
+                        <div class="upload-zone" id="decode-dropzone">
+                            <span class="upload-icon">❖</span>
+                            <span class="upload-text">Drag & Drop a .semic or .semic.jpg file here</span>
+                            <input type="file" id="decode-file" accept=".semic,.jpg,.semic.jpg" hidden>
+                        </div>
+
+                        <div class="options">
+                            <h3>Reconstruction Profile</h3>
+                            <div class="radio-group">
+                                <label class="radio-card">
+                                    <input type="radio" name="decode-mode" value="Lite">
+                                    <div class="card-content">
+                                        <h4>Lite</h4>
+                                        <p>Skip AI • Fast Preview</p>
+                                    </div>
+                                </label>
+                                <label class="radio-card">
+                                    <input type="radio" name="decode-mode" value="Standard" checked>
+                                    <div class="card-content">
+                                        <h4>Standard</h4>
+                                        <p>SD Inpainting • 20 Steps</p>
+                                    </div>
+                                </label>
+                                <label class="radio-card">
+                                    <input type="radio" name="decode-mode" value="HighFi">
+                                    <div class="card-content">
+                                        <h4>HighFi</h4>
+                                        <p>SD + Depth • 50 Steps</p>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Advanced Settings -->
+                        <div class="advanced-toggle" id="advanced-toggle">
+                            <button type="button" class="toggle-btn" id="toggle-advanced-btn">
+                                <span class="toggle-icon">⚙</span> Advanced Settings
+                                <span class="toggle-arrow" id="toggle-arrow">▸</span>
+                            </button>
+                        </div>
+                        <div class="advanced-panel" id="advanced-panel" style="display: none;">
+                            <div class="param-group">
+                                <label for="param-cn-scale" class="param-label">
+                                    ControlNet Scale: <span id="val-cn-scale">0.5</span>
+                                </label>
+                                <input type="range" id="param-cn-scale" min="0" max="1" step="0.05" value="0.5"
+                                       oninput="document.getElementById('val-cn-scale').innerText=this.value">
+                                <span class="param-hint">Depth map influence (0=ignore, 1=strict)</span>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-strength" class="param-label">
+                                    Denoise Strength: <span id="val-strength">1.0</span>
+                                </label>
+                                <input type="range" id="param-strength" min="0.5" max="1" step="0.05" value="1.0"
+                                       oninput="document.getElementById('val-strength').innerText=this.value">
+                                <span class="param-hint">1.0 = full regeneration, lower = more original color preserved</span>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-guidance" class="param-label">
+                                    Guidance Scale: <span id="val-guidance">7.5</span>
+                                </label>
+                                <input type="range" id="param-guidance" min="1" max="20" step="0.5" value="7.5"
+                                       oninput="document.getElementById('val-guidance').innerText=this.value">
+                                <span class="param-hint">Prompt adherence (higher = stricter, may reduce naturalness)</span>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-steps" class="param-label">
+                                    Inference Steps: <span id="val-steps">—</span>
+                                </label>
+                                <input type="range" id="param-steps" min="10" max="100" step="5" value="0"
+                                       oninput="document.getElementById('val-steps').innerText=this.value==0?'Auto':this.value">
+                                <span class="param-hint">0 = Auto (20 for Standard, 50 for HighFi)</span>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="action-btn" id="decode-btn">
+                            <span class="btn-text">Reconstruct Image</span>
+                            <span class="loader" style="display: none;"></span>
+                        </button>
+                    </form>
+
+                    <div id="result-container" style="display: none;">
+                        <h3>Reconstructed Result</h3>
+                        <img id="result-image" src="" alt="Decoded result">
+                        <a id="download-btn" class="action-btn secondary" download="reconstructed.jpg">Download Image</a>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
