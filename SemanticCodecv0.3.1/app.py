@@ -12,7 +12,7 @@ import numpy as np
 import cv2
 import piexif
 import torch
-from transformers import BlipProcessor, BlipForConditionalGeneration, SegformerFeatureExtractor, SegformerForSemanticSegmentation, pipeline as hf_pipeline
+from transformers import BlipProcessor, BlipForConditionalGeneration, SegformerImageProcessor, SegformerForSemanticSegmentation, pipeline as hf_pipeline
 from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, UniPCMultistepScheduler
 from rembg import remove
 
@@ -94,7 +94,7 @@ def init_models():
         print("Depth Anything v2 Small loaded.")
 
         # 3. Segformer for semantic segmentation (ADE20K 150 classes)
-        seg_feature_extractor = SegformerFeatureExtractor.from_pretrained(
+        seg_feature_extractor = SegformerImageProcessor.from_pretrained(
             "nvidia/segformer-b0-finetuned-ade-512-512"
         )
         seg_model = SegformerForSemanticSegmentation.from_pretrained(
@@ -165,7 +165,8 @@ def generate_seg_map(image):
         return Image.new("RGB", image.size, (120, 120, 120))
 
     inputs = seg_feature_extractor(images=image, return_tensors="pt")
-    inputs = {k: v.to(seg_model.device) for k, v in inputs.items()}
+    model_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    inputs = {k: v.to(seg_model.device, model_dtype) for k, v in inputs.items()}
 
     with torch.no_grad():
         outputs = seg_model(**inputs)
