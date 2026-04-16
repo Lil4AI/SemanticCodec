@@ -436,7 +436,7 @@ def download_encoded(download_id):
 @app.route('/api/decode', methods=['POST'])
 def decode_image():
     init_models()
-    session_id = f"dec_{int(time.time())}_{random.randint(1000,9999)}"
+    session_id = request.form.get('session_id', f"dec_{int(time.time())}_{random.randint(1000,9999)}")
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
