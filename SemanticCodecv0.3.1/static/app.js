@@ -181,8 +181,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressLabel = document.getElementById('progress-label');
     const progressEta = document.getElementById('progress-eta');
 
-    // Store before image URL from uploaded .semic thumbnail
-    let beforeImageUrl = null;
 
     decodeForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -193,16 +191,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Extract thumbnail from .semic.jpg for "Before" comparison
-        const semFile = fileInput.files[0];
-        if (beforeImageUrl) window.URL.revokeObjectURL(beforeImageUrl);
-        beforeImageUrl = window.URL.createObjectURL(semFile);
-        beforeImage.src = beforeImageUrl;
-
         const mode = document.querySelector('input[name="decode-mode"]:checked').value;
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
         formData.append('mode', mode);
+
+        // Generate session ID for SSE progress tracking
+        const sessionId = `dec_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        formData.append('session_id', sessionId);
 
         // Add advanced parameters
         const cnScale = document.getElementById('param-cn-scale').value;
@@ -228,7 +224,23 @@ document.addEventListener('DOMContentLoaded', () => {
         progressLabel.textContent = 'Generating... Step 0/0';
         progressEta.textContent = 'ETA: --';
 
-        let eventSource = null;
+        // Connect SSE before sending request
+        let eventSource = new EventSource(`/api/progress/${sessionId}`);
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const pct = data.total > 0 ? (data.step / data.total) * 100 : 0;
+            progressFill.style.width = pct + '%';
+            progressLabel.textContent = `Generating... Step ${data.step}/${data.total}`;
+            if (data.eta_seconds > 0) {
+                progressEta.textContent = `ETA: ${data.eta_seconds}s`;
+            } else {
+                progressEta.textContent = data.done ? 'Complete!' : 'ETA: --';
+            }
+            if (data.done && eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        };
 
         try {
             const res = await fetch('/api/decode', {
@@ -239,27 +251,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) {
                 const err = await res.json();
                 throw new Error(err.error || 'Server error');
-            }
-
-            // Read session_id from response header for SSE progress
-            const sessionId = res.headers.get('X-Session-Id');
-            if (sessionId) {
-                eventSource = new EventSource(`/api/progress/${sessionId}`);
-                eventSource.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-                    const pct = data.total > 0 ? (data.step / data.total) * 100 : 0;
-                    progressFill.style.width = pct + '%';
-                    progressLabel.textContent = `Generating... Step ${data.step}/${data.total}`;
-                    if (data.eta_seconds > 0) {
-                        progressEta.textContent = `ETA: ${data.eta_seconds}s`;
-                    } else {
-                        progressEta.textContent = data.done ? 'Complete!' : 'ETA: --';
-                    }
-                    if (data.done && eventSource) {
-                        eventSource.close();
-                        eventSource = null;
-                    }
-                };
             }
 
             const blob = await res.blob();
@@ -282,22 +273,6 @@ document.addEventListener('DOMContentLoaded', () => {
             setLoading(decodeBtn, decodeLoader, false);
         }
     });
-
-    // --- Comparison Slider Logic ---
-    const compRange = document.getElementById('comparison-range');
-    const compBefore = document.getElementById('comparison-before');
-    const compHandle = document.getElementById('comparison-handle');
-
-    if (compRange) {
-        compRange.addEventListener('input', () => {
-            const val = compRange.value;
-            compBefore.style.clipPath = `inset(0 ${100 - val}% 0 0)`;
-            compHandle.style.left = val + '%';
-        });
-        // Initialize
-        compBefore.style.clipPath = 'inset(0 50% 0 0)';
-        compHandle.style.left = '50%';
-    }
 
     function setLoading(btn, loader, isLoading) {
         btn.disabled = isLoading;
