@@ -86,10 +86,9 @@ Decode 完了後にオプションで適用可能な DOF ブラー:
 
 ---
 
-## 6. Before/After 比較スライダー
+## 6. Before/After 結果の表示
 
-Decode 完了時に、入力 `.semic.jpg` のプレビュー画像（Before）と
-AI 再構成後の画像（After）を `clip-path: inset()` スライダーで比較可能。
+Decode 完了時に、AI 再構成後の生成画像を直接表示（比較スライダー機能は廃止されました）。
 
 ---
 

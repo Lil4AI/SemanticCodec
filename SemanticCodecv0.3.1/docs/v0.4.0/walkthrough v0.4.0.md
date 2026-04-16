@@ -42,10 +42,6 @@ v0.4.0 では以下の4フェーズを完了。
 - `/api/progress/<session_id>` SSE エンドポイント (300ms ポーリング)
 - フロントエンド: shimmer アニメーション付きプログレスバー + ETA 表示
 
-**比較スライダー**:
-- `.semic.jpg` のプレビュー画像を Before として使用
-- `clip-path: inset()` + range input でドラッグ可能なスライダー
-- Before/After ラベル + ハンドル (◀▶) 表示
 
 ---
 
@@ -67,7 +63,7 @@ ASCII プログレスバー付き: `[████████░░░░░░]
 |---------|---------|
 | `app.py` | Segformer, Multi-ControlNet, スタイル分類, DOF, SSE 進捗 |
 | `cli.py` | **新規** — CLI エンコード/デコード |
-| `templates/index.html` | v0.4.0 バッジ, seg_map 統計, Seg Scale スライダー, DOF スライダー, 進捗バー, 比較スライダー |
-| `static/app.js` | seg_map 統計計算, seg_scale/dof_strength 送信, SSE 購読, 比較スライダーロジック |
-| `static/style.css` | seg-fill 色, プログレスバー, 比較スライダー CSS |
+| `templates/index.html` | v0.4.0 バッジ, seg_map 統計, Seg Scale スライダー, DOF スライダー, 進捗バー |
+| `static/app.js` | seg_map 統計計算, seg_scale/dof_strength 送信, SSE 購読 |
+| `static/style.css` | seg-fill 色, プログレスバー |
 | `docs/v0.4.0/specifications v0.4.0.md` | **新規** — 仕様書 |
