@@ -103,18 +103,22 @@ def init_models():
         ).to(device)
         print("Segformer-B0 (ADE20K) loaded.")
 
-        # 4. Multi-ControlNet (Depth + Seg) + SD Inpainting setup
-        controlnet_depth = ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11f1p_sd15_depth",
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32
-        )
-        controlnet_seg = ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11p_sd15_seg",
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32
-        )
-        print("Multi-ControlNet (Depth + Seg) loaded.")
-
         if device == "cuda":
+            print(f"CUDA Device Detected: {torch.cuda.get_device_name(0)}")
+            vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"Total VRAM: {vram_total:.2f} GB")
+
+            # 4. Multi-ControlNet (Depth + Seg) + SD Inpainting setup
+            controlnet_depth = ControlNetModel.from_pretrained(
+                "lllyasviel/control_v11f1p_sd15_depth",
+                torch_dtype=torch.float16
+            )
+            controlnet_seg = ControlNetModel.from_pretrained(
+                "lllyasviel/control_v11p_sd15_seg",
+                torch_dtype=torch.float16
+            )
+            print("Multi-ControlNet (Depth + Seg) loaded in FP16.")
+
             sd_pipeline = StableDiffusionControlNetInpaintPipeline.from_pretrained(
                 "runwayml/stable-diffusion-inpainting",
                 controlnet=[controlnet_depth, controlnet_seg],
@@ -122,8 +126,26 @@ def init_models():
                 safety_checker=None
             )
             sd_pipeline.scheduler = UniPCMultistepScheduler.from_config(sd_pipeline.scheduler.config)
-            sd_pipeline.enable_model_cpu_offload()  # VRAM optimization
+            
+            # Optimization for 8GB VRAM (RTX 2060 Super)
+            # 8GB is actually easily overwhelmed by Multi-ControlNet + SD1.5 at high resolutions.
+            # We must use model_cpu_offload to prevent WDDM from swapping to system RAM (which causes 16s/it).
+            sd_pipeline.enable_model_cpu_offload()
+            try:
+                sd_pipeline.enable_xformers_memory_efficient_attention()
+                print("xformers enabled for VRAM optimization.")
+            except Exception:
+                sd_pipeline.enable_attention_slicing()
+                print("Attention slicing enabled (xformers not found).")
         else:
+            print("Running on CPU. This will be slow!")
+            # 4. Multi-ControlNet (Depth + Seg) + SD Inpainting setup
+            controlnet_depth = ControlNetModel.from_pretrained(
+                "lllyasviel/control_v11f1p_sd15_depth"
+            )
+            controlnet_seg = ControlNetModel.from_pretrained(
+                "lllyasviel/control_v11p_sd15_seg"
+            )
             sd_pipeline = StableDiffusionControlNetInpaintPipeline.from_pretrained(
                 "runwayml/stable-diffusion-inpainting",
                 controlnet=[controlnet_depth, controlnet_seg],
@@ -196,25 +218,38 @@ def generate_vqa_caption(image, bg_mask_img):
         return "A photo of a natural background environment, masterpiece, photorealistic, highly detailed, 8k resolution, sharp focus", "blurry, low quality", "photo"
 
     # 1. Style Classification using BLIP (Zero-shot approach)
-    # We ask BLIP specifically about the artistic style.
+    # Stage 1: Descriptive prefix
     style_prefix = "The artistic style of this image is best described as a"
     inputs = blip_processor(image, text=style_prefix, return_tensors="pt").to(blip_model.device, blip_model.dtype)
     out = blip_model.generate(**inputs, max_new_tokens=20)
     raw_style = blip_processor.decode(out[0], skip_special_tokens=True).lower()
 
-    # Rule-based categorization
-    if any(w in raw_style for w in ["photo", "photograph", "real", "camera", "picture"]):
-        detected_style = "photo"
-    elif any(w in raw_style for w in ["illust", "anime", "cartoon", "drawing", "sketch", "2d", "comic"]):
-        detected_style = "illustration"
-    elif any(w in raw_style for w in ["paint", "watercolor", "oil", "acrylic", "canvas", "brush"]):
-        detected_style = "painting"
-    elif any(w in raw_style for w in ["pattern", "texture", "flat", "abstract", "geometric", "design"]):
-        detected_style = "pattern"
-    else:
-        detected_style = "photo" # default fallback
+    def categorize(text):
+        if any(w in text for w in ["photo", "photograph", "real", "camera", "picture", "captured", "dslr", "natural"]):
+            return "photo"
+        if any(w in text for w in ["illust", "anime", "cartoon", "drawing", "sketch", "2d", "comic", "manga", "digital art", "artwork", "vector"]):
+            return "illustration"
+        if any(w in text for w in ["paint", "watercolor", "oil", "acrylic", "canvas", "brush", "stroke"]):
+            return "painting"
+        if any(w in text for w in ["pattern", "texture", "flat", "abstract", "geometric", "design"]):
+            return "pattern"
+        return None
+
+    detected_style = categorize(raw_style)
+
+    # Stage 2: Fallback to direct Q&A if Stage 1 is inconclusive
+    if not detected_style:
+        qa_prompt = "Question: Is this image a photograph, a digital illustration, or a painting? Answer:"
+        inputs = blip_processor(image, text=qa_prompt, return_tensors="pt").to(blip_model.device, blip_model.dtype)
+        out = blip_model.generate(**inputs, max_new_tokens=10)
+        qa_answer_raw = blip_processor.decode(out[0], skip_special_tokens=True).lower()
+        # Remove the prompt text from the answer to prevent false keyword matches
+        qa_answer = qa_answer_raw.replace(qa_prompt.lower(), "").strip()
         
-    print(f"[VQA Style Match] Raw: '{raw_style}' -> Categorized: {detected_style}")
+        detected_style = categorize(qa_answer) or "photo" # default fallback
+        print(f"[VQA Style Match] Stage 1 inconclusive. Stage 2 (Q&A): '{qa_answer}' -> Categorized: {detected_style}")
+    else:
+        print(f"[VQA Style Match] Raw: '{raw_style}' -> Categorized: {detected_style}")
 
     # 2. Create foreground-masked image (foreground blacked out)
     #    This prevents BLIP from describing the subject (e.g. "a horse")
@@ -243,25 +278,49 @@ def generate_vqa_caption(image, bg_mask_img):
     combined = ", ".join(captions)
 
     # 4. Construct Positive and Negative prompts based on categorized style
-    #    This forces the AI to generate a pan-focus background for photos and avoids oil-painting artifacts.
     if detected_style == "photo":
-        pos_prompt = combined + ", true photographic masterpiece, f/8, deep depth of field, sharp focus everywhere, photorealistic, 8k, highly detailed photography"
+        raw_pos = combined + ", true photographic masterpiece, f/8, deep depth of field, sharp focus everywhere, photorealistic, 8k, highly detailed photography"
         neg_prompt = "blurry, shallow depth of field, bokeh, out of focus, painting, illustration, cartoon, fake, 3d render, abstract, oil painting, ugly, deformed, grain, noise"
     elif detected_style == "illustration":
-        pos_prompt = combined + ", highly detailed illustration, 2D anime style, sharp lines, vibrant colors, flat shading, masterpiece"
+        raw_pos = combined + ", highly detailed illustration, 2d anime style, sharp lines, vibrant colors, flat shading, masterpiece"
         neg_prompt = "photograph, realistic, 3d render, blurry, bokeh, painting, messy, distorted, photographic"
     elif detected_style == "painting":
-        pos_prompt = combined + ", beautiful painting, traditional art style, visible brushstrokes, canvas texture, masterpiece"
+        raw_pos = combined + ", beautiful painting, traditional art style, visible brushstrokes, canvas texture, masterpiece"
         neg_prompt = "photograph, realistic, 3d render, blurry, anime, cartoon, flat, ugly, photo"
     elif detected_style == "pattern":
-        pos_prompt = combined + ", seamless pattern, flat texture, 2D design, repeating elements, high quality graphic design"
+        raw_pos = combined + ", seamless pattern, flat texture, 2d design, repeating elements, high quality graphic design"
         neg_prompt = "depth, 3d, realistic, blurry, bokeh, photograph, perspective, messy"
     else:
-        pos_prompt = combined + ", masterpiece, high quality"
+        raw_pos = combined + ", masterpiece, high quality"
         neg_prompt = "blurry, low quality"
+
+    # Clean and truncate the positive prompt to stay under 77 token limit
+    pos_prompt = clean_and_truncate_prompt(raw_pos)
 
     print(f"[VQA Prompt] {pos_prompt}\n[VQA Negative] {neg_prompt}")
     return pos_prompt, neg_prompt, detected_style
+
+
+def clean_and_truncate_prompt(prompt, max_tokens=70):
+    """Clean prompt of redundant commas and truncate keywords to stay under CLIP limits.
+    max_tokens=70 (leaving some buffer for the 77 limit)."""
+    # Simple heuristic: split by comma, remove empty, and take first N parts
+    parts = [p.strip() for p in prompt.split(',') if p.strip()]
+    
+    # Estimate tokens (approx 1.3 tokens per word)
+    # We take the most important parts (the first few are usually BLIP descriptions, then style)
+    # We assume roughly 1 keyword per 2 tokens
+    limited_parts = []
+    current_count = 0
+    for p in parts:
+        word_count = len(p.split())
+        estimated_tokens = word_count * 1.5 + 1 # rough overhead
+        if current_count + estimated_tokens > max_tokens:
+            break
+        limited_parts.append(p)
+        current_count += estimated_tokens
+    
+    return ", ".join(limited_parts)
 
 
 @app.route('/')
@@ -346,7 +405,7 @@ def encode_image():
         # 6. Create Manifest
         seed = random.randint(0, 2**32 - 1)
         manifest = {
-            "version": "0.4.0",
+            "version": "0.4.1",
             "guide_type": "depth",
             "width": width,
             "height": height,
@@ -555,10 +614,15 @@ def decode_image():
             proc_h = (height // 8) * 8
 
             # Since VRAM is limited, scale down during inference if too large
-            if proc_w * proc_h > 1024 * 1024:  # max 1MP limit for basic VRAM
-                scale = (1024 * 1024) ** 0.5 / (proc_w * proc_h) ** 0.5
+            # 8GB VRAM with Multi-ControlNet maxes out safely around 768x768 (0.59 MP).
+            max_pixels = 768 * 768
+            if proc_w * proc_h > max_pixels:
+                scale = max_pixels ** 0.5 / (proc_w * proc_h) ** 0.5
                 proc_w = int((proc_w * scale) // 8) * 8
                 proc_h = int((proc_h * scale) // 8) * 8
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # Clear memory buildup to prevent WDDM swap
 
             # Blur the thumbnail to dissolve JPEG block noise
             gen_bg = base_bg.filter(ImageFilter.GaussianBlur(radius=15)).resize(
