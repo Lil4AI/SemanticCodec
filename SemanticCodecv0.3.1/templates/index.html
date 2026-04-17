@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Semantic Codec v0.3.1 | Generative Image Compression</title>
+    <title>Semantic Codec v0.4.0 | Generative Image Compression</title>
     <meta name="description" content="A generative image compression prototype using Stable Diffusion, ControlNet Depth, and VQA-enhanced prompt extraction for lossless foreground and AI-reconstructed background.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,7 +23,7 @@
                 <h1>Semantic Codec</h1>
             </div>
             <p>Foreground Fidelity. Background Generativity.</p>
-            <span class="version-badge">v0.3.1 — Optimization Patch</span>
+            <span class="version-badge">v0.4.0 — Multi-ControlNet + Style Classification</span>
         </header>
 
         <main class="app-card">
@@ -130,6 +130,11 @@
                                     <div class="breakdown-bar"><div class="breakdown-fill thumb-fill" id="bar-thumb"></div></div>
                                     <span class="breakdown-size" id="size-thumb">—</span>
                                 </div>
+                                <div class="breakdown-item">
+                                    <span class="breakdown-label">seg_map.webp</span>
+                                    <div class="breakdown-bar"><div class="breakdown-fill seg-fill" id="bar-seg"></div></div>
+                                    <span class="breakdown-size" id="size-seg">—</span>
+                                </div>
                             </div>
                         </div>
                         <a id="stats-download-btn" class="action-btn secondary" style="margin-top: 16px; display: inline-flex; text-decoration: none;">Download .semic.jpg</a>
@@ -189,6 +194,14 @@
                                 <span class="param-hint">Depth map influence (0=ignore, 1=strict)</span>
                             </div>
                             <div class="param-group">
+                                <label for="param-seg-scale" class="param-label">
+                                    Segmentation Scale: <span id="val-seg-scale">0.4</span>
+                                </label>
+                                <input type="range" id="param-seg-scale" min="0" max="1" step="0.05" value="0.4"
+                                       oninput="document.getElementById('val-seg-scale').innerText=this.value">
+                                <span class="param-hint">Seg map influence on object class boundaries (0=ignore, 1=strict)</span>
+                            </div>
+                            <div class="param-group">
                                 <label for="param-strength" class="param-label">
                                     Denoise Strength: <span id="val-strength">1.0</span>
                                 </label>
@@ -212,6 +225,14 @@
                                        oninput="document.getElementById('val-steps').innerText=this.value==0?'Auto':this.value">
                                 <span class="param-hint">0 = Auto (20 for Standard, 50 for HighFi)</span>
                             </div>
+                            <div class="param-group">
+                                <label for="param-dof-strength" class="param-label">
+                                    DOF Strength: <span id="val-dof-strength">0</span>
+                                </label>
+                                <input type="range" id="param-dof-strength" min="0" max="15" step="1" value="0"
+                                       oninput="document.getElementById('val-dof-strength').innerText=this.value">
+                                <span class="param-hint">Background blur (Depth of Field) intensity (0=Off)</span>
+                            </div>
                         </div>
 
                         <button type="submit" class="action-btn" id="decode-btn">
@@ -219,6 +240,17 @@
                             <span class="loader" style="display: none;"></span>
                         </button>
                     </form>
+
+                    <!-- Progress Bar -->
+                    <div id="decode-progress" style="display: none;">
+                        <div class="progress-header">
+                            <span id="progress-label">Generating... Step 0/0</span>
+                            <span id="progress-eta">ETA: --</span>
+                        </div>
+                        <div class="progress-bar-track">
+                            <div class="progress-bar-fill" id="progress-fill" style="width: 0%;"></div>
+                        </div>
+                    </div>
 
                     <div id="result-container" style="display: none;">
                         <h3>Reconstructed Result</h3>

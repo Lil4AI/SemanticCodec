@@ -137,12 +137,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Component breakdown bars
                 const components = stats.components;
                 const totalComp = components.fg_color_webp + components.fg_alpha_webp
-                                + components.depth_map_webp + components.thumb_jpg;
+                                + components.depth_map_webp + components.thumb_jpg
+                                + (components.seg_map_webp || 0);
 
                 setBars('bar-fg-color', 'size-fg-color', components.fg_color_webp, totalComp);
                 setBars('bar-fg-alpha', 'size-fg-alpha', components.fg_alpha_webp, totalComp);
                 setBars('bar-depth', 'size-depth', components.depth_map_webp, totalComp);
                 setBars('bar-thumb', 'size-thumb', components.thumb_jpg, totalComp);
+                setBars('bar-seg', 'size-seg', components.seg_map_webp || 0, totalComp);
 
                 // Download link
                 const downloadBtn = document.getElementById('stats-download-btn');
@@ -172,7 +174,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const decodeLoader = decodeBtn.querySelector('.loader');
     const resultContainer = document.getElementById('result-container');
     const resultImage = document.getElementById('result-image');
+    const beforeImage = document.getElementById('before-image');
     const downloadBtn = document.getElementById('download-btn');
+    const progressContainer = document.getElementById('decode-progress');
+    const progressFill = document.getElementById('progress-fill');
+    const progressLabel = document.getElementById('progress-label');
+    const progressEta = document.getElementById('progress-eta');
+
 
     decodeForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -188,21 +196,51 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('file', fileInput.files[0]);
         formData.append('mode', mode);
 
+        // Generate session ID for SSE progress tracking
+        const sessionId = `dec_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        formData.append('session_id', sessionId);
+
         // Add advanced parameters
         const cnScale = document.getElementById('param-cn-scale').value;
         const strength = document.getElementById('param-strength').value;
         const guidance = document.getElementById('param-guidance').value;
         const steps = document.getElementById('param-steps').value;
+        const dofStrength = document.getElementById('param-dof-strength').value;
+        const segScale = document.getElementById('param-seg-scale').value;
 
         formData.append('controlnet_scale', cnScale);
         formData.append('strength', strength);
         formData.append('guidance_scale', guidance);
+        formData.append('dof_strength', dofStrength);
+        formData.append('seg_scale', segScale);
         if (steps && parseInt(steps) > 0) {
             formData.append('steps', steps);
         }
 
         setLoading(decodeBtn, decodeLoader, true);
         resultContainer.style.display = 'none';
+        progressContainer.style.display = 'block';
+        progressFill.style.width = '0%';
+        progressLabel.textContent = 'Generating... Step 0/0';
+        progressEta.textContent = 'ETA: --';
+
+        // Connect SSE before sending request
+        let eventSource = new EventSource(`/api/progress/${sessionId}`);
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const pct = data.total > 0 ? (data.step / data.total) * 100 : 0;
+            progressFill.style.width = pct + '%';
+            progressLabel.textContent = `Generating... Step ${data.step}/${data.total}`;
+            if (data.eta_seconds > 0) {
+                progressEta.textContent = `ETA: ${data.eta_seconds}s`;
+            } else {
+                progressEta.textContent = data.done ? 'Complete!' : 'ETA: --';
+            }
+            if (data.done && eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        };
 
         try {
             const res = await fetch('/api/decode', {
@@ -221,11 +259,17 @@ document.addEventListener('DOMContentLoaded', () => {
             downloadBtn.href = url;
             downloadBtn.download = `reconstructed_${mode}.jpg`;
 
+            // Hide progress, show results with comparison slider
+            progressContainer.style.display = 'none';
+            progressFill.style.width = '100%';
             resultContainer.style.display = 'block';
+            resultContainer.classList.add('fade-in');
 
         } catch (err) {
             alert(`Error decoding file: ${err.message}`);
+            progressContainer.style.display = 'none';
         } finally {
+            if (eventSource) { eventSource.close(); }
             setLoading(decodeBtn, decodeLoader, false);
         }
     });
