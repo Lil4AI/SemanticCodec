@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Semantic Codec v0.4.0 — CLI Mode
+"""Semantic Codec v0.4.1 - CLI Mode
 
 Usage:
     python cli.py encode <image_path> [--mode Standard|HighFi|Lite] [--output <path>]
@@ -26,19 +26,14 @@ import piexif
 # Import shared functions from app.py
 # We need to handle the Flask imports gracefully
 os.environ.setdefault('FLASK_SKIP_DOTENV', '1')
-from app import (
-    init_models, generate_depth_map, generate_seg_map,
-    generate_vqa_caption, models_loaded, sd_pipeline, depth_estimator,
-    seg_feature_extractor, seg_model, blip_processor, blip_model,
-    decode_progress, progress_lock
-)
+import app
 from rembg import remove
 import torch
 
 
 def cli_encode(args):
     """Encode an image into .semic.jpg format."""
-    init_models()
+    app.init_models()
 
     print(f"Encoding: {args.input}")
     print(f"Mode: {args.mode}")
@@ -59,18 +54,18 @@ def cli_encode(args):
 
     # 2. VQA Caption
     print("[2/5] Extracting VQA captions...")
-    pos_prompt, neg_prompt, img_style = generate_vqa_caption(original_img, bg_mask)
+    pos_prompt, neg_prompt, img_style = app.generate_vqa_caption(original_img, bg_mask)
     print(f"  Style: {img_style}")
     print(f"  Prompt: {pos_prompt[:80]}...")
 
     # 3. Depth Map
     print("[3/5] Generating depth map...")
-    depth_map = generate_depth_map(original_img)
+    depth_map = app.generate_depth_map(original_img)
     depth_map.thumbnail((1024, 1024), Image.LANCZOS)
 
     # 3.5 Segmentation Map
     print("[3.5/5] Generating segmentation map...")
-    seg_map = generate_seg_map(original_img)
+    seg_map = app.generate_seg_map(original_img)
     seg_map.thumbnail((1024, 1024), Image.LANCZOS)
 
     # 4. Thumbnail
@@ -98,7 +93,7 @@ def cli_encode(args):
 
     seed = random.randint(0, 2**32 - 1)
     manifest = {
-        "version": "0.4.0",
+        "version": "0.4.1",
         "guide_type": "depth",
         "width": width,
         "height": height,
@@ -146,7 +141,7 @@ def cli_encode(args):
 
 def cli_decode(args):
     """Decode a .semic.jpg file back to an image."""
-    init_models()
+    app.init_models()
 
     print(f"Decoding: {args.input}")
     print(f"Mode: {args.mode}")
@@ -190,7 +185,7 @@ def cli_decode(args):
     if steps == 0:
         steps = 50 if args.mode == 'HighFi' else 20
 
-    if args.mode == 'Lite' or not models_loaded:
+    if args.mode == 'Lite' or not app.models_loaded:
         print("  Mode: Lite (no AI generation)")
         result_img = base_bg.copy()
         result_img.paste(fg_color, (0, 0), fg_alpha)
@@ -206,10 +201,14 @@ def cli_decode(args):
 
         proc_w = (width // 8) * 8
         proc_h = (height // 8) * 8
-        if proc_w * proc_h > 1024 * 1024:
-            scale = (1024 * 1024) ** 0.5 / (proc_w * proc_h) ** 0.5
+        max_pixels = 768 * 768
+        if proc_w * proc_h > max_pixels:
+            scale = max_pixels ** 0.5 / (proc_w * proc_h) ** 0.5
             proc_w = int((proc_w * scale) // 8) * 8
             proc_h = int((proc_h * scale) // 8) * 8
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         gen_bg = base_bg.filter(ImageFilter.GaussianBlur(radius=15)).resize(
             (proc_w, proc_h), Image.LANCZOS
@@ -242,7 +241,7 @@ def cli_decode(args):
 
         neg = manifest.get("negative_prompt", "blurry, painting, abstract, artificial, low quality, deformed")
 
-        out_bg = sd_pipeline(
+        out_bg = app.sd_pipeline(
             prompt=prompt,
             negative_prompt=neg,
             image=gen_bg,
@@ -290,7 +289,7 @@ def cli_decode(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Semantic Codec v0.4.0 — CLI Mode",
+        description="Semantic Codec v0.4.1 - CLI Mode",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
