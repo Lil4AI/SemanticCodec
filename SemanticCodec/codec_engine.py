@@ -279,8 +279,21 @@ def inference_size(width: int, height: int, max_pixels: int = MAX_INFERENCE_PIXE
 
 
 def _encode_image(img: Image.Image, fmt: str, **kwargs: Any) -> bytes:
+    """Encode PIL Image to bytes with format-specific mode sanitization.
+
+    - WEBP: requires RGB, RGBA, or RGBX mode (converts L / P / CMYK automatically).
+    - JPEG: requires RGB or L mode (converts RGBA / P / CMYK automatically).
+    """
     buf = io.BytesIO()
-    img.save(buf, format=fmt, **kwargs)
+    save_img = img
+    fmt_upper = fmt.upper()
+    if fmt_upper == "WEBP":
+        if save_img.mode not in ("RGB", "RGBA", "RGBX"):
+            save_img = save_img.convert("RGBA" if "A" in save_img.mode else "RGB")
+    elif fmt_upper in ("JPEG", "JPG"):
+        if save_img.mode not in ("RGB", "L"):
+            save_img = save_img.convert("RGB")
+    save_img.save(buf, format=fmt, **kwargs)
     return buf.getvalue()
 
 
