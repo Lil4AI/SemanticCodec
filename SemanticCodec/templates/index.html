@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Semantic Codec v0.4.0 | Generative Image Compression</title>
-    <meta name="description" content="A generative image compression prototype using Stable Diffusion, ControlNet Depth, and VQA-enhanced prompt extraction for lossless foreground and AI-reconstructed background.">
+    <title>Semantic Codec v1.0.0 | ROI Semantic & Generative Image Codec</title>
+    <meta name="description" content="A generative ROI image codec achieving extreme compression via tight foreground bounding boxes, 8-bit indexed segmentation maps, and multi-controlnet background synthesis.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -23,7 +23,7 @@
                 <h1>Semantic Codec</h1>
             </div>
             <p>Foreground Fidelity. Background Generativity.</p>
-            <span class="version-badge">v0.4.0 — Multi-ControlNet + Style Classification</span>
+            <span class="version-badge">v1.0.0 — ROI Semantic & Generative Image Codec</span>
         </header>
 
         <main class="app-card">
@@ -60,21 +60,21 @@
                                     <input type="radio" name="encode-mode" value="Lite">
                                     <div class="card-content">
                                         <h4>Lite</h4>
-                                        <p>Fast • Minimum Size</p>
+                                        <p>Fast • Minimum Size (No Seg)</p>
                                     </div>
                                 </label>
                                 <label class="radio-card">
                                     <input type="radio" name="encode-mode" value="Standard" checked>
                                     <div class="card-content">
                                         <h4>Standard</h4>
-                                        <p>SD Inpainting • Balanced</p>
+                                        <p>ROI Crop • 8-bit Seg • Balanced</p>
                                     </div>
                                 </label>
                                 <label class="radio-card">
                                     <input type="radio" name="encode-mode" value="HighFi">
                                     <div class="card-content">
                                         <h4>HighFi</h4>
-                                        <p>SD + Depth • High Quality</p>
+                                        <p>Lossless Alpha/Depth • 512px Maps</p>
                                     </div>
                                 </label>
                             </div>
@@ -89,6 +89,16 @@
                     <!-- Compression Stats Card -->
                     <div id="stats-container" class="stats-card" style="display: none;">
                         <h3>📊 Compression Results</h3>
+                        
+                        <!-- AI Insights Tag -->
+                        <div class="insights-container" id="encode-insights" style="margin-bottom: 16px;">
+                            <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px;">
+                                <span class="badge" id="stat-style-badge">photo</span>
+                                <span style="font-size: 0.8rem; color: var(--text-secondary);" id="stat-dims">1920 × 1080</span>
+                            </div>
+                            <div class="vqa-prompt-box" id="stat-prompt-preview">"a natural background scene..."</div>
+                        </div>
+
                         <div class="stats-grid">
                             <div class="stat-item">
                                 <span class="stat-label">Original</span>
@@ -103,7 +113,15 @@
                                 <span class="stat-value" id="stat-ratio">—</span>
                             </div>
                             <div class="stat-item stat-highlight">
-                                <span class="stat-label">Ratio</span>
+                                <span class="stat-label">Bitrate (bpp)</span>
+                                <span class="stat-value" id="stat-bpp">—</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">FG Ratio</span>
+                                <span class="stat-value" id="stat-fg-ratio">—</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Ratio Display</span>
                                 <span class="stat-value" id="stat-ratio-display">—</span>
                             </div>
                         </div>
@@ -131,7 +149,7 @@
                                     <span class="breakdown-size" id="size-thumb">—</span>
                                 </div>
                                 <div class="breakdown-item">
-                                    <span class="breakdown-label">seg_map.webp</span>
+                                    <span class="breakdown-label">seg_map (8bit PNG)</span>
                                     <div class="breakdown-bar"><div class="breakdown-fill seg-fill" id="bar-seg"></div></div>
                                     <span class="breakdown-size" id="size-seg">—</span>
                                 </div>
@@ -150,28 +168,45 @@
                             <input type="file" id="decode-file" accept=".semic,.jpg,.semic.jpg" hidden>
                         </div>
 
+                        <!-- Pre-inspect Metadata Banner -->
+                        <div id="inspect-banner" class="inspect-banner" style="display: none;">
+                            <div class="inspect-header">
+                                <span class="inspect-badge" id="inspect-badge">Standard</span>
+                                <span class="inspect-title" id="inspect-title">Metadata Ready</span>
+                                <span class="inspect-bpp" id="inspect-bpp">0.00 bpp</span>
+                            </div>
+                            <div class="inspect-prompt" id="inspect-prompt">...</div>
+                        </div>
+
                         <div class="options">
                             <h3>Reconstruction Profile</h3>
-                            <div class="radio-group">
+                            <div class="radio-group four-cards">
                                 <label class="radio-card">
                                     <input type="radio" name="decode-mode" value="Lite">
                                     <div class="card-content">
                                         <h4>Lite</h4>
-                                        <p>Skip AI • Fast Preview</p>
+                                        <p>0 Steps • Instant</p>
                                     </div>
                                 </label>
                                 <label class="radio-card">
-                                    <input type="radio" name="decode-mode" value="Standard" checked>
+                                    <input type="radio" name="decode-mode" value="Turbo" checked>
+                                    <div class="card-content">
+                                        <h4>Turbo</h4>
+                                        <p>4 Steps • LCM-LoRA (~2s)</p>
+                                    </div>
+                                </label>
+                                <label class="radio-card">
+                                    <input type="radio" name="decode-mode" value="Standard">
                                     <div class="card-content">
                                         <h4>Standard</h4>
-                                        <p>SD Inpainting • 20 Steps</p>
+                                        <p>20 Steps • UniPC</p>
                                     </div>
                                 </label>
                                 <label class="radio-card">
                                     <input type="radio" name="decode-mode" value="HighFi">
                                     <div class="card-content">
                                         <h4>HighFi</h4>
-                                        <p>SD + Depth • 50 Steps</p>
+                                        <p>50 Steps • Multi-CN</p>
                                     </div>
                                 </label>
                             </div>
@@ -186,52 +221,70 @@
                         </div>
                         <div class="advanced-panel" id="advanced-panel" style="display: none;">
                             <div class="param-group">
+                                <label for="param-strength" class="param-label">
+                                    Denoise Strength: <span id="val-strength">0.85</span>
+                                </label>
+                                <input type="range" id="param-strength" min="0.5" max="1.0" step="0.05" value="0.85"
+                                       oninput="document.getElementById('val-strength').innerText=this.value">
+                                <span class="param-hint">0.85 maintains thumb color/lighting context; 1.0 is full re-synthesis</span>
+                            </div>
+
+                            <div class="param-group">
+                                <label class="param-checkbox-label">
+                                    <input type="checkbox" id="param-color-harmonize" checked>
+                                    <span class="checkbox-custom"></span>
+                                    <span>Color Harmonization (Reinhard LAB Transfer)</span>
+                                </label>
+                                <span class="param-hint">Synchronizes generated background lighting and color temperature with original thumbnail</span>
+                            </div>
+
+                            <div class="param-group">
+                                <label for="param-prompt-override" class="param-label">
+                                    Prompt Override (Optional):
+                                </label>
+                                <textarea id="param-prompt-override" class="text-input" rows="2" placeholder="Leave empty to use archived prompt, or customize background generation..."></textarea>
+                                <span class="param-hint">Edit the scene prompt extracted by BLIP to generate alternative backgrounds</span>
+                            </div>
+
+                            <div class="param-group">
                                 <label for="param-cn-scale" class="param-label">
-                                    ControlNet Scale: <span id="val-cn-scale">0.5</span>
+                                    ControlNet Depth Scale: <span id="val-cn-scale">0.5</span>
                                 </label>
                                 <input type="range" id="param-cn-scale" min="0" max="1" step="0.05" value="0.5"
                                        oninput="document.getElementById('val-cn-scale').innerText=this.value">
-                                <span class="param-hint">Depth map influence (0=ignore, 1=strict)</span>
+                                <span class="param-hint">Depth map spatial structure influence (0=ignore, 1=strict)</span>
                             </div>
                             <div class="param-group">
                                 <label for="param-seg-scale" class="param-label">
-                                    Segmentation Scale: <span id="val-seg-scale">0.4</span>
+                                    ControlNet Seg Scale: <span id="val-seg-scale">0.4</span>
                                 </label>
                                 <input type="range" id="param-seg-scale" min="0" max="1" step="0.05" value="0.4"
                                        oninput="document.getElementById('val-seg-scale').innerText=this.value">
-                                <span class="param-hint">Seg map influence on object class boundaries (0=ignore, 1=strict)</span>
-                            </div>
-                            <div class="param-group">
-                                <label for="param-strength" class="param-label">
-                                    Denoise Strength: <span id="val-strength">1.0</span>
-                                </label>
-                                <input type="range" id="param-strength" min="0.5" max="1" step="0.05" value="1.0"
-                                       oninput="document.getElementById('val-strength').innerText=this.value">
-                                <span class="param-hint">1.0 = full regeneration, lower = more original color preserved</span>
+                                <span class="param-hint">Semantic segmentation boundaries influence (0=ignore, 1=strict)</span>
                             </div>
                             <div class="param-group">
                                 <label for="param-guidance" class="param-label">
-                                    Guidance Scale: <span id="val-guidance">7.5</span>
+                                    Guidance Scale: <span id="val-guidance">1.8</span>
                                 </label>
-                                <input type="range" id="param-guidance" min="1" max="20" step="0.5" value="7.5"
-                                       oninput="document.getElementById('val-guidance').innerText=this.value">
-                                <span class="param-hint">Prompt adherence (higher = stricter, may reduce naturalness)</span>
+                                <input type="range" id="param-guidance" min="1" max="15" step="0.1" value="1.8"
+                                       oninput="this.dataset.userModified='true'; document.getElementById('val-guidance').innerText=this.value">
+                                <span class="param-hint">Prompt adherence (auto-syncs: 1.8 for Turbo LCM, 7.5 for Standard/HighFi)</span>
                             </div>
                             <div class="param-group">
                                 <label for="param-steps" class="param-label">
-                                    Inference Steps: <span id="val-steps">—</span>
+                                    Inference Steps: <span id="val-steps">Auto</span>
                                 </label>
-                                <input type="range" id="param-steps" min="10" max="100" step="5" value="0"
+                                <input type="range" id="param-steps" min="0" max="100" step="1" value="0"
                                        oninput="document.getElementById('val-steps').innerText=this.value==0?'Auto':this.value">
-                                <span class="param-hint">0 = Auto (20 for Standard, 50 for HighFi)</span>
+                                <span class="param-hint">0 = Auto (Turbo: 4, Standard: 20, HighFi: 50)</span>
                             </div>
                             <div class="param-group">
                                 <label for="param-dof-strength" class="param-label">
-                                    DOF Strength: <span id="val-dof-strength">0</span>
+                                    DOF Bokeh Strength: <span id="val-dof-strength">0</span>
                                 </label>
                                 <input type="range" id="param-dof-strength" min="0" max="15" step="1" value="0"
                                        oninput="document.getElementById('val-dof-strength').innerText=this.value">
-                                <span class="param-hint">Background blur (Depth of Field) intensity (0=Off)</span>
+                                <span class="param-hint">Depth-layered background bokeh with occlusion fill (0=Off)</span>
                             </div>
                         </div>
 
@@ -252,9 +305,34 @@
                         </div>
                     </div>
 
+                    <!-- Comparison Result Container -->
                     <div id="result-container" style="display: none;">
                         <h3>Reconstructed Result</h3>
-                        <img id="result-image" src="" alt="Decoded result">
+                        
+                        <div class="comparison-wrapper" id="comparison-wrapper">
+                            <div class="comparison-container" id="comparison-slider">
+                                <img id="after-image" class="comparison-img after" src="" alt="AI Reconstructed">
+                                <div class="comparison-overlay" id="comparison-overlay">
+                                    <img id="before-image" class="comparison-img before" src="" alt="Lite Preview">
+                                </div>
+                                <div class="comparison-handle" id="comparison-handle">
+                                    <div class="handle-line"></div>
+                                    <div class="handle-circle">◂▸</div>
+                                </div>
+                            </div>
+                            <div class="comparison-labels">
+                                <span>◂ Lite Preview</span>
+                                <span>AI Reconstructed ▸</span>
+                            </div>
+                        </div>
+
+                        <div class="result-stats" id="result-stats" style="margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+                            <span id="result-mode-tag" class="badge">Turbo</span>
+                            <span id="result-time-tag" style="color: var(--text-secondary); font-size: 0.85rem;">Time: 2.1s</span>
+                            <span id="result-meta-tag" style="color: var(--text-secondary); font-size: 0.82rem;"></span>
+                        </div>
+                        <div id="result-warnings" style="display: none; margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: #fbbf24; font-size: 0.8rem;"></div>
+
                         <a id="download-btn" class="action-btn secondary" download="reconstructed.jpg">Download Image</a>
                     </div>
                 </div>

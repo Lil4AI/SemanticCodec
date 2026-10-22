@@ -1,332 +1,251 @@
 #!/usr/bin/env python3
-"""Semantic Codec v0.4.1 - CLI Mode
+"""Semantic Codec v1.0.0 - CLI Mode
 
 Usage:
-    python cli.py encode <image_path> [--mode Standard|HighFi|Lite] [--output <path>]
-    python cli.py decode <semic_path> [--mode Standard|HighFi|Lite] [--output <path>]
-                                      [--cn-scale 0.5] [--seg-scale 0.4]
-                                      [--strength 1.0] [--guidance 7.5]
-                                      [--steps 20] [--dof 0]
+    # 1. Encode
+    python cli.py encode input.jpg [--mode Lite|Standard|HighFi] [-o output.semic.jpg] [--lora <file>] [--lora-scale 1.0]
+
+    # 2. Decode
+    python cli.py decode input.semic.jpg [--mode Lite|Turbo|Standard|HighFi] [-o decoded.jpg]
+                                         [--cn-scale 0.5] [--seg-scale 0.4] [--strength 0.85]
+                                         [--guidance 7.5] [--steps 20] [--dof 0]
+                                         [--no-color-harmonize] [--prompt "custom prompt"]
+
+    # 3. Inspect (.semic.jpg metadata, components, and bpp)
+    python cli.py inspect input.semic.jpg
+
+    # 4. Benchmark (Rate-Distortion evaluation across Lite, Standard, HighFi)
+    python cli.py benchmark input.jpg
 """
 
 import argparse
-import sys
-import os
 import json
-import zipfile
-import io
+import os
+import sys
 import time
-import random
 
-from PIL import Image, ImageOps, ImageFilter
-import numpy as np
-import cv2
-import piexif
+import codec_engine as engine
 
-# Import shared functions from app.py
-# We need to handle the Flask imports gracefully
-os.environ.setdefault('FLASK_SKIP_DOTENV', '1')
-import app
-from rembg import remove
-import torch
+
+def format_bytes(n):
+    if n is None:
+        return "-"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
 
 
 def cli_encode(args):
     """Encode an image into .semic.jpg format."""
-    app.init_models()
+    print(f"=== SemanticCodec v{engine.VERSION} [Encode] ===")
+    print(f"Input : {args.input}")
+    print(f"Mode  : {args.mode}")
 
-    print(f"Encoding: {args.input}")
-    print(f"Mode: {args.mode}")
+    if not os.path.exists(args.input):
+        print(f"Error: Input file '{args.input}' not found.", file=sys.stderr)
+        sys.exit(1)
 
-    # Load image
-    original_img = Image.open(args.input).convert("RGB")
-    width, height = original_img.size
-    original_file_size = os.path.getsize(args.input)
+    models = engine.ModelManager() if not args.no_ai else None
+    t0 = time.time()
 
-    print(f"Image: {width}x{height} ({original_file_size / 1024:.1f} KB)")
+    def progress_cb(stage, step, total):
+        print(f"  [{step}/{total}] {stage.capitalize()}...")
 
-    # 1. Background Separation
-    print("[1/5] Separating foreground...")
-    fg_rgba = remove(original_img)
-    fg_color = fg_rgba.convert("RGB")
-    fg_alpha = fg_rgba.split()[3]
-    bg_mask = ImageOps.invert(fg_alpha)
+    result = engine.encode_to_semic(
+        args.input,
+        mode=args.mode,
+        models=models,
+        use_ai=not args.no_ai,
+        lora_model=args.lora or "",
+        lora_scale=args.lora_scale,
+        progress=progress_cb
+    )
 
-    # 2. VQA Caption
-    print("[2/5] Extracting VQA captions...")
-    pos_prompt, neg_prompt, img_style = app.generate_vqa_caption(original_img, bg_mask)
-    print(f"  Style: {img_style}")
-    print(f"  Prompt: {pos_prompt[:80]}...")
+    out_path = args.output or (os.path.splitext(args.input)[0] + ".semic.jpg")
+    with open(out_path, "wb") as f:
+        f.write(result.data)
 
-    # 3. Depth Map
-    print("[3/5] Generating depth map...")
-    depth_map = app.generate_depth_map(original_img)
-    depth_map.thumbnail((1024, 1024), Image.LANCZOS)
-
-    # 3.5 Segmentation Map
-    print("[3.5/5] Generating segmentation map...")
-    seg_map = app.generate_seg_map(original_img)
-    seg_map.thumbnail((1024, 1024), Image.LANCZOS)
-
-    # 4. Thumbnail
-    print("[4/5] Creating thumbnail...")
-    thumb = original_img.copy()
-    thumb.thumbnail((256, 256))
-
-    # 5. Packaging
-    print("[5/5] Packaging .semic.jpg...")
-
-    fg_color_io = io.BytesIO()
-    fg_color.save(fg_color_io, format='WEBP', quality=85, method=6)
-
-    fg_alpha_io = io.BytesIO()
-    fg_alpha.save(fg_alpha_io, format='WEBP', lossless=True)
-
-    thumb_io = io.BytesIO()
-    thumb.save(thumb_io, format='JPEG', quality=8)
-
-    depth_io = io.BytesIO()
-    depth_map.save(depth_io, format='WEBP', lossless=True)
-
-    seg_io = io.BytesIO()
-    seg_map.save(seg_io, format='WEBP', lossless=True)
-
-    seed = random.randint(0, 2**32 - 1)
-    manifest = {
-        "version": "0.4.1",
-        "guide_type": "depth",
-        "width": width,
-        "height": height,
-        "prompt": pos_prompt,
-        "negative_prompt": neg_prompt,
-        "image_style": img_style,
-        "random_seed": seed,
-        "model_version": "stable-diffusion-inpainting-1.5_multi-controlnet-depth-seg",
-        "encoded_mode": args.mode,
-        "lora_model": "",
-        "lora_scale": 1.0
-    }
-
-    final_io = io.BytesIO()
-
-    # Preview JPEG
-    preview = Image.new("RGB", (width, height), (20, 20, 20))
-    preview.paste(fg_color, (0, 0), fg_alpha)
-    preview.thumbnail((512, 512))
-    preview.save(final_io, format='JPEG', quality=85)
-
-    # ZIP payload
-    with zipfile.ZipFile(final_io, 'a', zipfile.ZIP_DEFLATED) as zipf:
-        zipf.writestr('manifest.json', json.dumps(manifest))
-        zipf.writestr('fg_color.webp', fg_color_io.getvalue())
-        zipf.writestr('fg_alpha.webp', fg_alpha_io.getvalue())
-        zipf.writestr('thumb.jpg', thumb_io.getvalue())
-        zipf.writestr('depth_map.webp', depth_io.getvalue())
-        zipf.writestr('seg_map.webp', seg_io.getvalue())
-
-    semic_size = final_io.tell()
-    final_io.seek(0)
-
-    # Determine output path
-    output_path = args.output or os.path.splitext(args.input)[0] + '.semic.jpg'
-    with open(output_path, 'wb') as f:
-        f.write(final_io.getvalue())
-
-    ratio = (1 - semic_size / original_file_size) * 100 if original_file_size > 0 else 0
-    print(f"\n✅ Encoded successfully!")
-    print(f"  Output: {output_path}")
-    print(f"  Original: {original_file_size / 1024:.1f} KB → .semic: {semic_size / 1024:.1f} KB")
-    print(f"  Compression: {ratio:.1f}% reduced ({original_file_size / semic_size:.1f}:1)")
+    stats = result.stats
+    print(f"\n[OK] Encoded successfully in {time.time() - t0:.2f}s!")
+    print(f"  Output       : {out_path}")
+    print(f"  Original Size: {format_bytes(stats.get('original_size'))}")
+    print(f"  .semic Size  : {format_bytes(stats.get('semic_size'))}")
+    print(f"  Bitrate (bpp): {stats.get('bpp')} bpp")
+    print(f"  Compression  : {stats.get('compression_ratio_pct')}% reduction ({stats.get('ratio_display')})")
+    print(f"  FG Area Ratio: {stats.get('fg_area_ratio_pct')}%")
+    print(f"  Detected Style: {result.manifest.get('image_style')}")
+    print(f"  Prompt       : {result.manifest.get('prompt')[:100]}...")
 
 
 def cli_decode(args):
     """Decode a .semic.jpg file back to an image."""
-    app.init_models()
+    print(f"=== SemanticCodec v{engine.VERSION} [Decode] ===")
+    print(f"Input : {args.input}")
+    print(f"Mode  : {args.mode}")
 
-    print(f"Decoding: {args.input}")
-    print(f"Mode: {args.mode}")
+    if not os.path.exists(args.input):
+        print(f"Error: Input file '{args.input}' not found.", file=sys.stderr)
+        sys.exit(1)
 
-    # Load .semic file
-    with zipfile.ZipFile(args.input, 'r') as zipf:
-        manifest = json.loads(zipf.read('manifest.json'))
-        fg_color = Image.open(io.BytesIO(zipf.read('fg_color.webp'))).convert("RGB")
-        fg_alpha = Image.open(io.BytesIO(zipf.read('fg_alpha.webp'))).convert("L")
-        thumb = Image.open(io.BytesIO(zipf.read('thumb.jpg'))).convert("RGB")
+    models = engine.ModelManager() if args.mode != "Lite" else None
+    t0 = time.time()
 
-        try:
-            depth_map_data = zipf.read('depth_map.webp')
-        except KeyError:
-            depth_map_data = zipf.read('depth_map.png')
-        depth_map = Image.open(io.BytesIO(depth_map_data)).convert("L")
-
-        try:
-            seg_map = Image.open(io.BytesIO(zipf.read('seg_map.webp'))).convert("RGB")
-        except KeyError:
-            seg_map = None
-
-    width = manifest["width"]
-    height = manifest["height"]
-    prompt = manifest["prompt"]
-    seed = manifest["random_seed"]
-
-    print(f"  Dimensions: {width}x{height}")
-    print(f"  Prompt: {prompt[:80]}...")
-
-    base_bg = thumb.resize((width, height), Image.LANCZOS)
-    bg_mask = ImageOps.invert(fg_alpha)
-
-    # Mask dilation
-    bg_mask_np = np.array(bg_mask)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    bg_mask_np = cv2.dilate(bg_mask_np, kernel, iterations=2)
-    bg_mask = Image.fromarray(bg_mask_np)
-
-    steps = args.steps
-    if steps == 0:
-        steps = 50 if args.mode == 'HighFi' else 20
-
-    if args.mode == 'Lite' or not app.models_loaded:
-        print("  Mode: Lite (no AI generation)")
-        result_img = base_bg.copy()
-        result_img.paste(fg_color, (0, 0), fg_alpha)
-    else:
-        print(f"  Running SD pipeline ({steps} steps)...")
-        generator = torch.Generator(
-            device="cpu" if not torch.cuda.is_available() else "cuda"
-        ).manual_seed(seed)
-
-        control_image = depth_map.resize((width, height), Image.LANCZOS)
-
-        effective_cn_scale = min(args.cn_scale, 0.3) if args.mode == 'Standard' else args.cn_scale
-
-        proc_w = (width // 8) * 8
-        proc_h = (height // 8) * 8
-        max_pixels = 768 * 768
-        if proc_w * proc_h > max_pixels:
-            scale = max_pixels ** 0.5 / (proc_w * proc_h) ** 0.5
-            proc_w = int((proc_w * scale) // 8) * 8
-            proc_h = int((proc_h * scale) // 8) * 8
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        gen_bg = base_bg.filter(ImageFilter.GaussianBlur(radius=15)).resize(
-            (proc_w, proc_h), Image.LANCZOS
-        )
-        gen_mask = bg_mask.resize((proc_w, proc_h), Image.LANCZOS)
-
-        gen_control_depth = control_image.resize((proc_w, proc_h), Image.LANCZOS)
-        gen_control_depth_rgb = Image.merge("RGB", [gen_control_depth, gen_control_depth, gen_control_depth])
-
-        if seg_map is not None:
-            gen_control_seg = seg_map.resize((proc_w, proc_h), Image.LANCZOS)
-        else:
-            gen_control_seg = Image.new("RGB", (proc_w, proc_h), (120, 120, 120))
-
-        gen_control_images = [gen_control_depth_rgb, gen_control_seg]
-
-        # Progress callback for CLI
-        start_time = time.time()
-
-        def cli_progress(pipe, step_index, timestep, callback_kwargs):
-            elapsed = time.time() - start_time
-            steps_done = step_index + 1
-            eta = (elapsed / steps_done) * (steps - steps_done) if steps_done > 0 else 0
-            bar_len = 30
-            filled = int(bar_len * steps_done / steps)
-            bar = '█' * filled + '░' * (bar_len - filled)
-            sys.stdout.write(f'\r  [{bar}] {steps_done}/{steps} | ETA: {eta:.1f}s ')
+    def progress_cb(stage, step=0, total=1, elapsed=None):
+        if stage == "generating":
+            bar_len = 25
+            filled = int(bar_len * step / total) if total > 0 else 0
+            bar = "█" * filled + "░" * (bar_len - filled)
+            eta = f" | ETA: {elapsed / step * (total - step):.1f}s" if (step > 0 and elapsed) else ""
+            sys.stdout.write(f"\r  [{bar}] {step}/{total} Steps{eta} ")
             sys.stdout.flush()
-            return callback_kwargs
+        else:
+            print(f"\n  Stage: {stage}...")
 
-        neg = manifest.get("negative_prompt", "blurry, painting, abstract, artificial, low quality, deformed")
+    result = engine.decode_semic(
+        args.input,
+        mode=args.mode,
+        models=models,
+        controlnet_scale=args.cn_scale,
+        seg_scale=args.seg_scale,
+        strength=args.strength,
+        guidance_scale=args.guidance,
+        steps=args.steps if args.steps > 0 else None,
+        dof_strength=args.dof,
+        color_harmonize=not args.no_color_harmonize,
+        custom_prompt=args.prompt,
+        progress=progress_cb
+    )
 
-        out_bg = app.sd_pipeline(
-            prompt=prompt,
-            negative_prompt=neg,
-            image=gen_bg,
-            mask_image=gen_mask,
-            control_image=gen_control_images,
-            num_inference_steps=steps,
-            strength=args.strength,
-            generator=generator,
-            controlnet_conditioning_scale=[effective_cn_scale, args.seg_scale],
-            guidance_scale=args.guidance,
-            callback_on_step_end=cli_progress,
-        ).images[0]
+    out_path = args.output or (os.path.splitext(args.input)[0] + f"_decoded_{args.mode.lower()}.jpg")
+    with open(out_path, "wb") as f:
+        f.write(result.to_jpeg_bytes())
 
-        print()  # newline after progress bar
+    print(f"\n\n[OK] Decoded successfully in {time.time() - t0:.2f}s!")
+    print(f"  Output       : {out_path}")
+    print(f"  Mode Used    : {result.info.get('mode_used')}")
+    print(f"  Inference    : {result.info.get('steps')} steps ({result.info.get('scheduler')})")
+    metrics = result.info.get("metrics", {})
+    if "bg_color_fidelity" in metrics and metrics["bg_color_fidelity"] is not None:
+        print(f"  Color Fidelity: {metrics['bg_color_fidelity']}%")
+    if "fg_psnr_db" in metrics and metrics["fg_psnr_db"] is not None:
+        print(f"  FG PSNR      : {metrics['fg_psnr_db']} dB")
 
-        out_bg = out_bg.resize((width, height), Image.LANCZOS)
 
-        # DOF post-processing
-        if args.dof > 0:
-            print(f"  Applying DOF blur (strength={args.dof})...")
-            out_bg_blurred = out_bg.filter(ImageFilter.GaussianBlur(radius=args.dof))
-            depth_for_blend = depth_map.resize((width, height), Image.LANCZOS)
-            inv_depth = ImageOps.invert(depth_for_blend)
-            out_bg = Image.composite(out_bg_blurred, out_bg, inv_depth)
+def cli_inspect(args):
+    """Inspect .semic.jpg container metadata and breakdown."""
+    print(f"=== SemanticCodec v{engine.VERSION} [Inspect] ===")
+    if not os.path.exists(args.input):
+        print(f"Error: Input file '{args.input}' not found.", file=sys.stderr)
+        sys.exit(1)
 
-        result_img = out_bg.copy()
-        result_img.paste(fg_color, (0, 0), fg_alpha)
+    info = engine.inspect_semic(args.input)
+    print(f"File         : {args.input}")
+    print(f"Format       : Polyglot (.semic.jpg)")
+    print(f"Codec Version: v{info.get('version')}")
+    print(f"Dimensions   : {info.get('width')} x {info.get('height')}")
+    print(f"Total Size   : {format_bytes(info.get('total_size'))} ({info.get('total_size')} bytes)")
+    print(f"Bitrate (bpp): {info.get('bpp')} bpp")
+    print(f"Guide Type   : {info.get('guide_type')}")
+    print(f"Encoded Mode : {info.get('encoded_mode')}")
+    print(f"Has FG       : {info.get('has_foreground')} (BBox: {info.get('fg_bbox')})")
+    print(f"FG Area Ratio: {info.get('fg_area_ratio_pct')}%")
+    print(f"Style        : {info.get('image_style')}")
+    print(f"Seed         : {info.get('random_seed')}")
+    print(f"Seg Format   : {info.get('seg_format')}")
+    print(f"Prompt       : {info.get('prompt')}")
+    print(f"Neg Prompt   : {info.get('negative_prompt')}")
 
-    # Add EXIF
-    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
-    manifest_str = json.dumps({
-        "random_seed": seed,
-        "model_version": manifest["model_version"],
-        "prompt": prompt
-    })
-    exif_dict["Exif"][piexif.ExifIFD.UserComment] = manifest_str.encode("utf-8")
-    exif_bytes = piexif.dump(exif_dict)
+    print("\n--- Component Breakdown ---")
+    comps = info.get("components", {})
+    total = info.get("total_size", 1)
+    for name, size in sorted(comps.items(), key=lambda x: x[1], reverse=True):
+        pct = (size / total) * 100
+        print(f"  {name:<20}: {format_bytes(size):>10} ({pct:5.1f}%)")
 
-    output_path = args.output or os.path.splitext(args.input)[0] + f'_decoded_{args.mode}.jpg'
-    result_img.save(output_path, format='JPEG', quality=95, exif=exif_bytes)
+    if info.get("warnings"):
+        print("\nWarnings:")
+        for w in info["warnings"]:
+            print(f"  [!] {w}")
 
-    print(f"\n✅ Decoded successfully!")
-    print(f"  Output: {output_path}")
+
+def cli_benchmark(args):
+    """Run benchmark across Lite, Standard, HighFi profiles."""
+    print(f"=== SemanticCodec v{engine.VERSION} [Benchmark] ===")
+    if not os.path.exists(args.input):
+        print(f"Error: Input file '{args.input}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Running rate-distortion benchmark on: {args.input}")
+    models = engine.ModelManager() if not args.no_ai else None
+
+    def prog(mode):
+        print(f"  Evaluating profile: {mode}...")
+
+    rows = engine.benchmark_profiles(args.input, models=models, use_ai=not args.no_ai, progress=prog)
+
+    print("\n" + "=" * 90)
+    print(f"{'Profile':<10} | {'Size':<10} | {'bpp':<8} | {'Compression':<12} | {'FG Ratio':<9} | {'PSNR (dB)':<9} | {'SSIM':<7} | {'Time (s)':<8}")
+    print("-" * 90)
+    for r in rows:
+        psnr_str = f"{r['lite_psnr_db']:.2f}" if r['lite_psnr_db'] is not None else "N/A"
+        ssim_str = f"{r['lite_ssim']:.4f}" if r['lite_ssim'] is not None else "N/A"
+        print(f"{r['mode']:<10} | {format_bytes(r['semic_size']):<10} | {r['bpp']:<8.4f} | {r['compression_ratio_pct']:>5.1f}% ({r['ratio_display']}) | {r['fg_area_ratio_pct']:>6.1f}%  | {psnr_str:<9} | {ssim_str:<7} | {r['encode_time_sec']:<8.2f}")
+    print("=" * 90)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Semantic Codec v0.4.1 - CLI Mode",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python cli.py encode photo.jpg
-  python cli.py encode photo.jpg --mode HighFi --output compressed.semic.jpg
-  python cli.py decode compressed.semic.jpg
-  python cli.py decode compressed.semic.jpg --mode HighFi --steps 50 --dof 5
-        """
+        description=f"Semantic Codec v{engine.VERSION} - CLI Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers = parser.add_subparsers(dest='command', required=True)
+    # 1. Encode
+    enc = subparsers.add_parser("encode", help="Encode image to .semic.jpg")
+    enc.add_argument("input", help="Input image path (JPEG, PNG, WebP)")
+    enc.add_argument("--mode", choices=["Lite", "Standard", "HighFi"], default="Standard", help="Encode profile")
+    enc.add_argument("-o", "--output", help="Output .semic.jpg path")
+    enc.add_argument("--lora", help="Optional LoRA filename (in loras/)")
+    enc.add_argument("--lora-scale", type=float, default=1.0, help="LoRA scale (default: 1.0)")
+    enc.add_argument("--no-ai", action="store_true", help="Skip heavy AI (use GrabCut & gradient depth)")
 
-    # Encode subcommand
-    enc = subparsers.add_parser('encode', help='Encode image to .semic.jpg')
-    enc.add_argument('input', help='Input image path (JPEG/PNG/WebP)')
-    enc.add_argument('--mode', choices=['Lite', 'Standard', 'HighFi'], default='Standard')
-    enc.add_argument('--output', '-o', help='Output .semic.jpg path')
+    # 2. Decode
+    dec = subparsers.add_parser("decode", help="Decode .semic.jpg to image")
+    dec.add_argument("input", help="Input .semic.jpg path")
+    dec.add_argument("--mode", choices=["Lite", "Turbo", "Standard", "HighFi"], default="Standard", help="Reconstruction profile")
+    dec.add_argument("-o", "--output", help="Output image JPEG path")
+    dec.add_argument("--cn-scale", type=float, default=0.5, help="ControlNet Depth scale (0.0 - 1.0)")
+    dec.add_argument("--seg-scale", type=float, default=0.4, help="ControlNet Seg scale (0.0 - 1.0)")
+    dec.add_argument("--strength", type=float, default=engine.DEFAULT_STRENGTH, help="Denoising strength (default: 0.85)")
+    dec.add_argument("--guidance", type=float, default=None, help="Guidance scale (default: auto 1.8 for Turbo, 7.5 for Standard/HighFi)")
+    dec.add_argument("--steps", type=int, default=0, help="Inference steps override (0 = auto for profile)")
+    dec.add_argument("--dof", type=float, default=0.0, help="Depth of Field bokeh blur strength (0 = off)")
+    dec.add_argument("--no-color-harmonize", action="store_true", help="Disable Reinhard LAB color harmonization")
+    dec.add_argument("--prompt", help="Override background prompt during generation")
 
-    # Decode subcommand
-    dec = subparsers.add_parser('decode', help='Decode .semic.jpg to image')
-    dec.add_argument('input', help='Input .semic or .semic.jpg path')
-    dec.add_argument('--mode', choices=['Lite', 'Standard', 'HighFi'], default='Standard')
-    dec.add_argument('--output', '-o', help='Output JPEG path')
-    dec.add_argument('--cn-scale', type=float, default=0.5, help='ControlNet Depth scale (0-1)')
-    dec.add_argument('--seg-scale', type=float, default=0.4, help='ControlNet Seg scale (0-1)')
-    dec.add_argument('--strength', type=float, default=1.0, help='Denoise strength (0.5-1)')
-    dec.add_argument('--guidance', type=float, default=7.5, help='Guidance scale (1-20)')
-    dec.add_argument('--steps', type=int, default=0, help='Inference steps (0=auto)')
-    dec.add_argument('--dof', type=float, default=0, help='DOF blur strength (0=off)')
+    # 3. Inspect
+    insp = subparsers.add_parser("inspect", help="Inspect .semic.jpg metadata and components")
+    insp.add_argument("input", help="Input .semic.jpg path")
+
+    # 4. Benchmark
+    bm = subparsers.add_parser("benchmark", help="Benchmark Lite, Standard, HighFi profiles on an image")
+    bm.add_argument("input", help="Input image path")
+    bm.add_argument("--no-ai", action="store_true", help="Use fallback GrabCut/gradient for faster offline testing")
 
     args = parser.parse_args()
 
-    if args.command == 'encode':
+    if args.command == "encode":
         cli_encode(args)
-    elif args.command == 'decode':
+    elif args.command == "decode":
         cli_decode(args)
+    elif args.command == "inspect":
+        cli_inspect(args)
+    elif args.command == "benchmark":
+        cli_benchmark(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
