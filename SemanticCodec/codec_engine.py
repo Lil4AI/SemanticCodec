@@ -670,18 +670,20 @@ class ModelManager:
         """Depth-Anything-V2 relative depth (255 = near, 0 = far) as L image."""
         if self.depth_estimator is None:
             return None
-        result = self.depth_estimator(image)
+        safe_img = image.convert("RGB")
+        result = self.depth_estimator(safe_img)
         depth = result["depth"]
-        if depth.size != image.size:
-            depth = depth.resize(image.size, Image.BICUBIC)
+        if depth.size != safe_img.size:
+            depth = depth.resize(safe_img.size, Image.BICUBIC)
         return depth.convert("L")
 
     def generate_seg_ids(self, image: Image.Image, max_dim: int) -> Optional[np.ndarray]:
         """SegFormer ADE20K class IDs at <= ``max_dim`` (aspect ratio kept)."""
         if self.seg_model is None or self.seg_feature_extractor is None:
             return None
-        tw, th = fit_within(image.width, image.height, max_dim)
-        inputs = self.seg_feature_extractor(images=image, return_tensors="pt")
+        safe_img = image.convert("RGB")
+        tw, th = fit_within(safe_img.width, safe_img.height, max_dim)
+        inputs = self.seg_feature_extractor(images=safe_img, return_tensors="pt")
         inputs = {k: v.to(self.seg_model.device, self.seg_model.dtype) for k, v in inputs.items()}
         with torch.no_grad():
             logits = self.seg_model(**inputs).logits
@@ -711,19 +713,20 @@ class ModelManager:
             out = model.generate(**inputs, max_new_tokens=max_new_tokens)
             return proc.decode(out[0], skip_special_tokens=True).strip()
 
+        safe_img = image.convert("RGB")
         style_prefix = "The artistic style of this image is best described as a"
-        raw_style = ask(image, style_prefix, 20).lower()
+        raw_style = ask(safe_img, style_prefix, 20).lower()
         detected = categorize_style(raw_style)
         if not detected:
             qa_prompt = "Question: Is this image a photograph, a digital illustration, or a painting? Answer:"
-            qa_answer = ask(image, qa_prompt, 10).lower().replace(qa_prompt.lower(), "").strip()
+            qa_answer = ask(safe_img, qa_prompt, 10).lower().replace(qa_prompt.lower(), "").strip()
             detected = categorize_style(qa_answer) or "photo"
             self._log(f"[VQA Style] stage-1 inconclusive, stage-2 '{qa_answer}' -> {detected}")
         else:
             self._log(f"[VQA Style] '{raw_style}' -> {detected}")
 
         # Foreground blacked out so BLIP describes the background, not the subject.
-        bg_only = Image.composite(image, Image.new("RGB", image.size, (0, 0, 0)), bg_mask_img)
+        bg_only = Image.composite(safe_img, Image.new("RGB", safe_img.size, (0, 0, 0)), bg_mask_img.convert("L"))
         prefixes = [
             "the background scene shows",
             "the weather and lighting is",
@@ -1707,13 +1710,13 @@ def _generate_background(payload: SemicPayload, mode: str, models: ModelManager,
 
         # Inputs
         proc_w, proc_h = inference_size(w, h)
-        base_bg = build_base_background(payload, blur_radius=0)
-        blurred_bg = base_bg.filter(ImageFilter.GaussianBlur(radius=BG_INPUT_BLUR_RADIUS))
-        gen_image = blurred_bg.resize((proc_w, proc_h), Image.LANCZOS)
+        base_bg = build_base_background(payload, blur_radius=0).convert("RGB")
+        blurred_bg = base_bg.filter(ImageFilter.GaussianBlur(radius=BG_INPUT_BLUR_RADIUS)).convert("RGB")
+        gen_image = blurred_bg.resize((proc_w, proc_h), Image.LANCZOS).convert("RGB")
 
-        bg_mask = 255 - alpha_full
+        bg_mask = (255 - alpha_full).astype(np.uint8)
         bg_mask = cv2.dilate(bg_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=2)
-        gen_mask = Image.fromarray(bg_mask, "L").resize((proc_w, proc_h), Image.LANCZOS)
+        gen_mask = Image.fromarray(bg_mask, "L").resize((proc_w, proc_h), Image.NEAREST).convert("L")
 
         depth = payload.depth_map or _gradient_depth(w, h)
         depth_ctrl = depth.resize((proc_w, proc_h), Image.BICUBIC).convert("RGB")
@@ -1724,6 +1727,8 @@ def _generate_background(payload: SemicPayload, mode: str, models: ModelManager,
             eff_seg = 0.0
             if manifest.get("encoded_mode") != "Lite":
                 warnings.append("No segmentation map in file: Seg ControlNet disabled")
+        else:
+            seg_ctrl = seg_ctrl.convert("RGB")
         eff_cn = min(float(controlnet_scale), 0.3) if mode == "Standard" else float(controlnet_scale)
 
         generator = torch.Generator(device="cpu").manual_seed(seed)  # GPU-independent noise
